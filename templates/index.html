@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mood timeline</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,650;12..96,750&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@3.7.0/plotly.min.js" defer></script>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <main class="stage">
+      <header class="masthead">
+        <div class="title-row">
+          <h1>Mood timeline</h1>
+          <div class="switches">
+            <div class="segmented" role="radiogroup" aria-label="Music service">
+              <button type="button" role="radio" aria-checked="true" data-provider="spotify">Spotify</button>
+              <button type="button" role="radio" aria-checked="false" data-provider="youtube">YouTube Music</button>
+            </div>
+            <div class="segmented" role="radiogroup" aria-label="Songs to show">
+              <button type="button" role="radio" aria-checked="true" data-view="liked">Liked</button>
+              <button type="button" role="radio" aria-checked="false" data-view="listened">Listened</button>
+            </div>
+          </div>
+        </div>
+        <dl class="stats" id="stats" hidden></dl>
+      </header>
+
+      <div class="plot-wrap">
+        <div id="plot" aria-label="3D mood timeline"></div>
+        <section class="overlay" id="overlay" hidden>
+          <div class="overlay-panel" id="overlay-panel"></div>
+        </section>
+      </div>
+
+      <div class="sweep" id="sweep" hidden>
+        <button type="button" class="btn sweep-play" id="sweep-play" aria-label="Play"></button>
+        <input type="range" id="sweep-pos" min="0" max="0" value="0" step="1" aria-label="Sweep position">
+        <div class="sweep-meta">
+          <span id="sweep-label"></span>
+          <span class="sweep-size">
+            <span class="control-label">Window</span>
+            <span class="segmented small" role="radiogroup" aria-label="Songs in the sweep window">
+              <button type="button" role="radio" aria-checked="true" data-sweep="all">All</button>
+              <button type="button" role="radio" aria-checked="false" data-sweep="100">100</button>
+              <button type="button" role="radio" aria-checked="false" data-sweep="300">300</button>
+              <button type="button" role="radio" aria-checked="false" data-sweep="1000">1,000</button>
+            </span>
+          </span>
+        </div>
+      </div>
+    </main>
+
+    <aside class="side" id="side" hidden>
+      <section class="block">
+        <h2>Where your songs sit</h2>
+        <p class="hint" id="compass-hint">Click a quarter to show only those songs.</p>
+        <svg id="compass" viewBox="0 0 240 240" role="group" aria-label="Mood compass"></svg>
+      </section>
+
+      <section class="block" id="song-block" hidden>
+        <h2>Selected song</h2>
+        <div id="song-card"></div>
+      </section>
+
+      <section class="block">
+        <h2>View</h2>
+        <div class="control-row">
+          <span class="control-label">Time axis</span>
+          <div class="segmented small" role="radiogroup" aria-label="Time axis">
+            <button type="button" role="radio" aria-checked="true" data-axis="date">Date</button>
+            <button type="button" role="radio" aria-checked="false" data-axis="order">Order</button>
+          </div>
+        </div>
+        <div class="control-row" id="group-row" hidden>
+          <span class="control-label">Group plays by</span>
+          <div class="segmented small" role="radiogroup" aria-label="Group plays by">
+            <button type="button" role="radio" aria-checked="false" data-group="play">Each play</button>
+            <button type="button" role="radio" aria-checked="true" data-group="day">Day</button>
+            <button type="button" role="radio" aria-checked="false" data-group="week">Week</button>
+          </div>
+        </div>
+        <label class="check" id="weighting-row" hidden>
+          <input type="checkbox" id="weighting" checked>
+          <span>Weight songs by how often you played them</span>
+        </label>
+
+        <label class="range">
+          <span>Smooth the trail over <output id="smooth-out">7</output> songs</span>
+          <input type="range" id="smooth" min="3" max="41" step="2" value="7">
+        </label>
+        <label class="check">
+          <input type="checkbox" id="band" checked>
+          <span>Show confidence band around the trail</span>
+        </label>
+        <label class="range" id="level-row">
+          <span>Confidence level <output id="level-out">95</output>%</span>
+          <input type="range" id="level" min="0" max="100" step="1" value="95">
+          <span class="hint">Higher means a wider, surer band. Gaps mean too few songs there to tell. At 100% it would fill the chart, so it's hidden.</span>
+        </label>
+
+        <label class="range">
+          <span>Streak needs at least <output id="min-len-out">4</output> songs</span>
+          <input type="range" id="min-len" min="3" max="12" value="4">
+        </label>
+        <label class="range">
+          <span>Allow <output id="tolerance-out">1</output> off-mood song inside a streak</span>
+          <input type="range" id="tolerance" min="0" max="3" value="1">
+        </label>
+        <label class="check">
+          <input type="checkbox" id="show-unplaced">
+          <span>Show songs without mood data on the floor</span>
+        </label>
+
+        <div class="actions" id="spotify-actions">
+          <button type="button" class="btn" id="refresh">Refresh from Spotify</button>
+          <button type="button" class="text-btn" id="disconnect">Disconnect</button>
+        </div>
+        <div class="actions" id="youtube-actions" hidden>
+          <button type="button" class="btn" id="rebuild">Rebuild</button>
+          <button type="button" class="text-btn" id="reimport">Import a new export</button>
+        </div>
+        <p class="hint" id="generated"></p>
+      </section>
+
+      <section class="block" id="streak-block">
+        <div class="block-head">
+          <h2>Mood streaks</h2>
+          <button type="button" class="text-btn" id="clear-selection" hidden>Show all</button>
+        </div>
+        <p class="hint" id="streak-summary"></p>
+        <ol class="streaks" id="streaks"></ol>
+      </section>
+    </aside>
+  </div>
+</body>
+</html>

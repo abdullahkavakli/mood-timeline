@@ -1,0 +1,11 @@
+name: mood-timeline
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - flask>=3.0
+  - requests>=2.31
+  - python-dotenv>=1.0
+  - pip
+  - pip:
+      - spotipy>=2.25
