@@ -86,3 +86,7 @@ under 75% similar are skipped.
 - Original idea and MVP: Emir Soydal.
 - YouTube Music support and additional features: Abdullah Kavaklı.
 - Coded with the help of Claude (Anthropic).
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
