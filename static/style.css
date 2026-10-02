@@ -196,6 +196,11 @@ h2 {
 .file span { display: inline-block; border-radius: 999px; background: var(--ink); color: var(--paper);
   padding: 0.7rem 1.4rem; font-weight: 650; cursor: pointer; }
 .file input:focus-visible + span { outline: 2px solid var(--ink); outline-offset: 2px; }
+.field { display: block; margin-bottom: 0.6rem; }
+.field > span { display: block; font-weight: 650; margin-bottom: 0.3rem; }
+.field input { width: 100%; max-width: 26rem; font: inherit; font-family: ui-monospace, Consolas, monospace;
+  padding: 0.45rem 0.6rem; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+.saved { color: var(--calm); font-weight: 650; }
 .select { display: block; margin-bottom: 0.25rem; }
 .select span { display: block; font-weight: 650; margin-bottom: 0.3rem; }
 .select select { font: inherit; padding: 0.45rem 0.6rem; border: 1px solid var(--line); border-radius: 6px;
@@ -209,7 +214,7 @@ h2 {
 .check { display: flex; gap: 0.5rem; align-items: center; font-size: var(--step--1); cursor: pointer; }
 .check input { accent-color: var(--ink); }
 
-.actions { display: flex; align-items: center; gap: 1rem; margin: 1.25rem 0 0.5rem; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; margin: 1.25rem 0 0.5rem; }
 
 .btn {
   border: 0;
@@ -228,6 +233,7 @@ h2 {
 .text-btn { border: 0; background: none; padding: 0; color: var(--ink-soft); text-decoration: underline;
   text-underline-offset: 3px; cursor: pointer; font-size: var(--step--1); }
 .text-btn:hover { color: var(--ink); }
+.text-btn:disabled { opacity: 0.5; cursor: progress; }
 
 /* ------------------------------------------------------------------ overlay states */
 
@@ -236,6 +242,8 @@ h2 {
   inset: 0;
   display: grid;
   place-items: center;
+  place-items: safe center;   /* a panel taller than the chart scrolls instead of spilling out */
+  overflow-y: auto;
   padding: 1.5rem;
 }
 

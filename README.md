@@ -11,13 +11,13 @@ through time.**
 
 ```bash
 conda env create -p ./.conda-env -f environment.yml   # once
-cp .env.example .env                                   # then add a key, see below
 ./.conda-env/bin/python app.py                         # add --demo to try synthetic data
 ```
 
 Open <http://127.0.0.1:8888> (not `localhost`) and keep the terminal open while you use it.
 
-Songs need a mood source. Put at least one in `.env`, then restart:
+Songs need a mood source. Paste at least one under **API keys** in the app. It checks the key,
+saves it to `.env` on your computer and uses it right away (or edit `.env` yourself and restart):
 
 - **Last.fm** (`LASTFM_API_KEY`): free and instant at <https://www.last.fm/api/account/create>.
   Moods come from listeners' tags.
@@ -41,7 +41,7 @@ take 30–45 minutes. Results are cached in `data/mood_cache.json`, so rebuilds 
 
 1. At <https://developer.spotify.com/dashboard>, create a Web API app with the redirect URI
    `http://127.0.0.1:8888/callback`.
-2. Put its client ID and secret in `.env`, restart, and click Connect Spotify.
+2. Paste its client ID and secret under API keys, then click Connect Spotify.
 3. The app's owner needs Premium. On a 403, add your email under User Management.
 
 Spotify also improves YouTube moods: songs are matched by title and artist, and matches

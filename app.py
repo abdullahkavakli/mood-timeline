@@ -1,7 +1,7 @@
 """
 Mood timeline for your Spotify and YouTube Music songs.
 
-    python app.py          # real data (needs .env for Spotify)
+    python app.py          # real data (API keys in .env, or pasted on the page)
     python app.py --demo   # synthetic libraries, no accounts needed
 
 Then open http://127.0.0.1:8888 (use 127.0.0.1, not localhost: Spotify only
@@ -13,13 +13,16 @@ import json
 import logging
 import os
 import random
+import re
+import shutil
 import threading
 import traceback
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
+import requests
+from dotenv import load_dotenv, set_key
 from flask import Flask, jsonify, redirect, render_template, request
 
 import sources
@@ -31,9 +34,11 @@ DATA_DIR.mkdir(exist_ok=True)
 TOKEN_FILE = DATA_DIR / ".spotify-token"
 PROVIDERS = ("spotify", "youtube")
 
-load_dotenv(ROOT / ".env")
+ENV_FILE = ROOT / ".env"
+load_dotenv(ENV_FILE)
 HOST = "127.0.0.1"
 PORT = int(os.getenv("PORT", "8888"))
+LOOPBACK = {"127.0.0.1", "localhost"}
 REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", f"http://{HOST}:{PORT}/callback")
 SCOPE = "user-library-read"
 
@@ -74,6 +79,57 @@ def spotify_client():
     if am and am.validate_token(am.cache_handler.get_cached_token()):
         return spotipy.Spotify(auth_manager=am, retries=3, status_retries=3)
     return None
+
+
+# --------------------------------------------------------------------------- api keys
+
+KEY_FIELDS = {"lastfm": "LASTFM_API_KEY", "spotify_id": "SPOTIFY_CLIENT_ID",
+              "spotify_secret": "SPOTIFY_CLIENT_SECRET"}
+KEY_FORMAT = re.compile(r"^[A-Za-z0-9_-]{8,128}$")   # also keeps newlines and quotes out of .env
+KEYS_LOCK = threading.Lock()                          # one save at a time: .env is rewritten whole
+
+
+def check_lastfm(key):
+    """'ok', 'rejected', or 'unchecked' when Last.fm can't say (offline, busy, odd reply)."""
+    try:
+        body = requests.get("https://ws.audioscrobbler.com/2.0/", timeout=10, params={
+            "method": "track.getTopTags", "artist": "Cher", "track": "Believe",
+            "api_key": key, "format": "json"}).json()
+    except (requests.RequestException, ValueError):
+        return "unchecked"
+    if not isinstance(body, dict):
+        return "unchecked"
+    if body.get("error") in (10, 26):                 # invalid or suspended key
+        return "rejected"
+    return "unchecked" if body.get("error") in (11, 16, 29) else "ok"   # offline, busy, rate limit
+
+
+def check_spotify(client_id, client_secret):
+    """'ok', 'rejected', or 'unchecked' when Spotify can't be reached."""
+    try:
+        r = requests.post("https://accounts.spotify.com/api/token", timeout=10,
+                          data={"grant_type": "client_credentials"}, auth=(client_id, client_secret))
+    except requests.RequestException:
+        return "unchecked"
+    if r.status_code == 200:
+        return "ok"
+    return "rejected" if r.status_code in (400, 401) else "unchecked"
+
+
+def save_env(values):
+    """Write keys to .env (created from .env.example) and use them without a restart."""
+    example = ROOT / ".env.example"
+    if not ENV_FILE.exists():
+        if example.exists():
+            shutil.copyfile(example, ENV_FILE)
+        ENV_FILE.touch()
+        try:
+            os.chmod(ENV_FILE, 0o600)                 # keys: readable by you only (no-op on Windows)
+        except OSError:
+            pass
+    for name, value in values.items():
+        set_key(str(ENV_FILE), name, value, quote_mode="never")
+        os.environ[name] = value
 
 
 # --------------------------------------------------------------------------- job
@@ -120,6 +176,31 @@ def run_build(provider, likes_file=None):
 
 # --------------------------------------------------------------------------- routes
 
+def same_origin():
+    return request.headers.get("Origin") == request.host_url.rstrip("/")
+
+
+@app.before_request
+def local_only():
+    # Answer only to this computer's own names (any port): a web page that points its domain
+    # at 127.0.0.1 (DNS rebinding) must not read your history or change your keys.
+    host = request.host.lower()
+    name, _, port = host.rpartition(":")
+    if host not in LOOPBACK and not (port.isdigit() and name in LOOPBACK):
+        return f"Open http://{HOST}:{PORT} instead.", 403
+    # Other websites may link here, but not post here (browsers send Origin with every POST).
+    if request.method == "POST" and "Origin" in request.headers and not same_origin():
+        return jsonify(error="Requests from other websites aren't allowed."), 403
+
+
+@app.after_request
+def no_framing(response):
+    # No other page may show this one in a frame and trick clicks onto it (clickjacking).
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    return response
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
@@ -160,6 +241,47 @@ def status():
                  else youtube.cached_scan(DATA_DIR),
                  "spotify_matching": authed},
     )
+
+
+@app.post("/api/keys")
+def save_keys():
+    """Check pasted API keys with their service and save the good ones to .env.
+    Saved keys are never sent back; /api/status only says whether each is set."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not same_origin():   # this page always sends its Origin
+        return jsonify(error="Keys can only be saved from this page."), 403
+    new = {name: str(body.get(field) or "").strip() for field, name in KEY_FIELDS.items()}
+    new = {name: value for name, value in new.items() if value}
+    if not new:
+        return jsonify(error="Paste at least one key."), 400
+    if not all(KEY_FORMAT.match(value) for value in new.values()):
+        return jsonify(error="Keys contain only letters, digits, - and _. Check for a stray space or quote."), 400
+
+    with KEYS_LOCK:
+        result, save = {}, {}
+        if "LASTFM_API_KEY" in new:
+            result["lastfm"] = check_lastfm(new["LASTFM_API_KEY"])
+            if result["lastfm"] != "rejected":
+                save["LASTFM_API_KEY"] = new["LASTFM_API_KEY"]
+        if "SPOTIFY_CLIENT_ID" in new or "SPOTIFY_CLIENT_SECRET" in new:
+            client_id = new.get("SPOTIFY_CLIENT_ID") or os.getenv("SPOTIFY_CLIENT_ID")
+            secret = new.get("SPOTIFY_CLIENT_SECRET") or os.getenv("SPOTIFY_CLIENT_SECRET")
+            if not (client_id and secret):
+                return jsonify(error="Spotify needs both the client ID and the client secret."), 400
+            result["spotify"] = check_spotify(client_id, secret)
+            if result["spotify"] != "rejected":
+                save.update(SPOTIFY_CLIENT_ID=client_id, SPOTIFY_CLIENT_SECRET=secret)
+        old_app = (os.getenv("SPOTIFY_CLIENT_ID"), os.getenv("SPOTIFY_CLIENT_SECRET"))
+        if save:
+            try:
+                save_env(save)
+            except OSError as exc:
+                log.error("Couldn't write %s: %s", ENV_FILE, exc)
+                return jsonify(error=f"Couldn't write .env: {exc.strerror or exc}."), 500
+            log.info("Saved %s to .env", ", ".join(save))
+        if "SPOTIFY_CLIENT_ID" in save and (save["SPOTIFY_CLIENT_ID"], save["SPOTIFY_CLIENT_SECRET"]) != old_app:
+            TOKEN_FILE.unlink(missing_ok=True)       # a Spotify sign-in belongs to the old app
+    return jsonify(result)
 
 
 @app.post("/api/youtube/upload")
@@ -283,4 +405,4 @@ if __name__ == "__main__":
     log.info("Mood timeline running at %s", url)
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    app.run(host=HOST, port=PORT, debug=False)
+    app.run(host=HOST, port=PORT, debug=False, load_dotenv=False)   # only our own .env, loaded above

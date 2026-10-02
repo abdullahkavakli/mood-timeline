@@ -628,7 +628,11 @@ function syncSweep() {
   const hide = n < 2 || !S.data[S.provider] || !$("overlay").hidden;
   if (bar.hidden !== hide) {
     bar.hidden = hide;
-    if (S.plotted) Plotly.Plots.resize($("plot"));   // the bar takes height from the plot
+    if (S.plotted) {                                 // the bar takes height from the plot
+      const plot = $("plot");
+      plot.layout.scene.camera = viewCamera(VIEW.key);   // a resize re-applies the layout's camera
+      Plotly.Plots.resize(plot);
+    }
   }
   const whole = sweepMax() === 0;                    // the window already holds every song
   pos.max = sweepMax();
@@ -719,8 +723,15 @@ function refreshView() {
   renderStats();
   syncControls();
   if (!S.pts.length) {
-    overlay(`${STRIP}<h2>No song got a mood yet</h2>
-      <p>Neither ReccoBeats nor Last.fm returned data for this view. Check the terminal for errors, then rebuild.</p>`, { solid: false });
+    const data = S.data[S.provider];
+    const noSource = S.provider === "youtube" && !data.lastfm_enabled && !data.spotify_matching;
+    overlay(`${STRIP}<h2>No song got a mood yet</h2>${noSource
+      ? `<p>No mood source was set when this was built. Add a Last.fm key (or Spotify), then rebuild.</p>
+         <div class="actions"><button type="button" class="btn" data-keys>Add API keys</button>
+           <button type="button" class="text-btn" id="rebuild-now">Rebuild</button></div>`
+      : `<p>Neither ReccoBeats nor Last.fm returned data for this view. Check the terminal for errors, then rebuild.</p>`}`,
+    { solid: false });
+    $("rebuild-now")?.addEventListener("click", () => startBuild(S.provider));
   } else {
     hideOverlay();
   }
@@ -756,6 +767,8 @@ function syncControls() {
   $("level-out").textContent = S.level;
   $("level-row").classList.toggle("off", !S.band);
   $("spotify-actions").hidden = S.provider !== "spotify";
+  // New Spotify keys sign you out; offer the way back in next to the chart.
+  $("reconnect").hidden = !(S.status?.spotify?.configured && !S.status.spotify.authenticated);
   $("youtube-actions").hidden = S.provider !== "youtube";
   $("side").hidden = !data;
 }
@@ -811,6 +824,11 @@ function bindControls() {
     await fetch("/api/logout", { method: "POST" });
     location.href = "/";
   });
+  // "API keys" buttons live in the sidebar and in several overlays.
+  // Not during a build: the form would replace the progress screen that the build updates.
+  document.addEventListener("click", (ev) => {
+    if (ev.target.closest("[data-keys]") && S.status?.job?.status !== "running") showKeys();
+  });
 }
 
 /* ------------------------------------------------------------------ app states */
@@ -836,17 +854,84 @@ function clearChart() {
   $("sweep").hidden = true;
 }
 
+/* Paste API keys instead of editing .env. The server checks each with its service, saves the
+   good ones to .env on this computer and uses them at once. Saved keys never come back here. */
+function showKeys() {
+  const st = S.status;
+  const saved = (on) => (on && !st.demo ? ` <span class="saved">saved</span>` : "");
+  overlay(`${STRIP}<h2>API keys</h2>
+    <p>Keys stay on this computer, in the <code>.env</code> file next to <code>app.py</code>.
+      Leave a field empty to keep what's there.</p>
+    <label class="field"><span>Last.fm API key${saved(st.has_lastfm)}</span>
+      <input id="key-lastfm" autocomplete="off" spellcheck="false"></label>
+    <p class="hint">Free and instant at <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api/account/create</a>.
+      Moods come from listeners' tags.</p>
+    <label class="field"><span>Spotify client ID${saved(st.spotify.configured)}</span>
+      <input id="key-spotify-id" autocomplete="off" spellcheck="false"></label>
+    <label class="field"><span>Spotify client secret</span>
+      <input id="key-spotify-secret" type="password" autocomplete="off"></label>
+    <p class="hint">From your app at <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>,
+      with the redirect URI <code>${esc(st.spotify.redirect_uri)}</code>. Moods measured from the audio; the app's owner needs Premium.</p>
+    <p class="progress-text" id="keys-msg" role="status"></p>
+    <div class="actions"><button type="button" class="btn" id="keys-save">Save</button>
+      <button type="button" class="text-btn" id="keys-back">Back</button></div>`);
+  // Over a chart, go back to it as it was (zoom, streak, quarter); otherwise redraw the screen,
+  // which may now offer more (e.g. Connect Spotify once its keys are in).
+  $("keys-back").addEventListener("click", () => {
+    if (S.data[S.provider] && S.pts.length) { hideOverlay(); syncControls(); } else showProvider();
+  });
+  const inputs = { lastfm: "key-lastfm", spotify_id: "key-spotify-id", spotify_secret: "key-spotify-secret" };
+  Object.values(inputs).forEach((id) => $(id).addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !$("keys-save").disabled) $("keys-save").click();
+  }));
+  $("keys-save").addEventListener("click", async () => {
+    const body = Object.fromEntries(Object.entries(inputs).map(([k, id]) => [k, $(id).value.trim()]));
+    const buttons = [$("keys-save"), $("keys-back")];
+    buttons.forEach((b) => { b.disabled = true; });
+    $("keys-msg").textContent = "Checking the keys…";
+    let out;
+    try {
+      const res = await fetch("/api/keys", { method: "POST", headers: { "Content-Type": "application/json" },
+                                             body: JSON.stringify(body) });
+      out = await res.json().catch(() => ({ error: `Saving failed (error ${res.status}). See the terminal running app.py.` }));
+    } catch {
+      out = { error: "The app didn't answer. Is app.py still running?" };
+    }
+    try { S.status = await (await fetch("/api/status")).json(); } catch { /* keep the last status */ }
+    if (!$("keys-msg")) return;            // the form was closed meanwhile
+    buttons.forEach((b) => { b.disabled = false; });
+    if (out.error) {
+      $("keys-msg").innerHTML = `<span class="error">${esc(out.error)}</span>`;
+      return;
+    }
+    const said = {
+      lastfm: { ok: "Last.fm key works and is saved.", rejected: "Last.fm rejected this key, so it wasn't saved.",
+                unchecked: "Couldn't reach Last.fm to check the key; saved it anyway." },
+      spotify: { ok: "Spotify keys work and are saved.", rejected: "Spotify rejected this client ID and secret, so they weren't saved.",
+                 unchecked: "Couldn't reach Spotify to check the keys; saved them anyway." },
+    };
+    $("keys-msg").innerHTML = Object.entries(out).map(([k, v]) =>
+      `<span class="${v === "rejected" ? "error" : "saved"}">${esc(said[k][v])}</span>`).join("<br>");
+    for (const [k, v] of Object.entries(out)) {          // clear what was saved, keep what to fix
+      if (v === "rejected") continue;
+      (k === "lastfm" ? ["key-lastfm"] : ["key-spotify-id", "key-spotify-secret"]).forEach((id) => { $(id).value = ""; });
+    }
+    $("keys-back").textContent = "Done";
+  });
+  $("key-lastfm").focus();
+}
+
 function showSpotifySetup(st) {
   overlay(`${STRIP}<h2>Connect a Spotify app first</h2>
     <p>The timeline reads your Liked Songs through your own Spotify developer app.</p>
     <ol>
       <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>, create an app and choose Web API.</li>
       <li>Add this redirect URI exactly: <code>${esc(st.spotify.redirect_uri)}</code></li>
-      <li>Copy <code>.env.example</code> to <code>.env</code> and paste in the Client ID and Client secret.</li>
-      <li>Optional: add a Last.fm API key so songs ReccoBeats doesn't know still get a mood.</li>
-      <li>Restart <code>python app.py</code> and reload this page.</li>
+      <li>Paste its Client ID and Client secret under API keys. A Last.fm key there too gives songs
+        ReccoBeats doesn't know a mood.</li>
     </ol>
-    <p>To look around first, run <code>python app.py --demo</code>.</p>`);
+    <button type="button" class="btn big" data-keys>Enter API keys</button>
+    <p class="note">To look around first, run <code>python app.py --demo</code>.</p>`);
 }
 
 function showSpotifyConnect(error) {
@@ -854,13 +939,14 @@ function showSpotifyConnect(error) {
     ${error ? `<p class="error">Spotify sign-in didn't finish (${esc(error)}). Try again.</p>` : ""}
     <p>The app only asks to read your Liked Songs. The sign-in token stays in
       <code>data/.spotify-token</code> on this PC.</p>
-    <a class="btn big" href="/login">Connect Spotify</a>`);
+    <a class="btn big" href="/login">Connect Spotify</a>
+    <p class="note"><button type="button" class="text-btn" data-keys>Change API keys</button></p>`);
 }
 
 function showSpotifyBuild(st) {
   const lastfm = st.has_lastfm ? "" :
     `<p>Last.fm fallback is off, so songs ReccoBeats doesn't know will have no mood.
-     Add <code>LASTFM_API_KEY</code> to <code>.env</code> to turn it on.</p>`;
+     <button type="button" class="text-btn" data-keys>Add a Last.fm key</button></p>`;
   overlay(`${STRIP}<h2>Build your Spotify timeline</h2>
     <p>The first run looks up every liked song, which can take a few minutes for a big library.
       Later runs only look up songs you liked since.</p>${lastfm}
@@ -870,9 +956,15 @@ function showSpotifyBuild(st) {
 
 function matchingNote(st) {
   if (st.youtube.spotify_matching) return "";
-  const connect = st.spotify.configured ? ` <a href="/login">Connect Spotify</a>` : " Set up Spotify in <code>.env</code>";
+  const keys = (label) => `<button type="button" class="text-btn" data-keys>${label}</button>`;
+  const connect = `<a href="/login">Connect Spotify</a>`;
+  if (!st.has_lastfm) {      // Spotify keys alone don't help until Spotify is connected
+    return `<p class="error">No mood source yet: songs need a Last.fm key or a Spotify connection to get a mood.
+      ${st.spotify.configured ? `${connect} or ${keys("add a Last.fm key")}` : keys("Add API keys")}</p>`;
+  }
   return `<p class="note">YouTube songs are matched to Spotify to look up how they sound. Without a
-    Spotify connection, moods come from Last.fm tags only.${connect} first for better coverage.</p>`;
+    Spotify connection, moods come from Last.fm tags only. ${st.spotify.configured ? connect : keys("Add Spotify keys")}
+    for better coverage.</p>`;
 }
 
 function showYoutubeImport(takeout, again = false) {
@@ -905,13 +997,14 @@ async function uploadTakeout(ev) {
   $("upload-status").textContent = `Reading ${plural(files.length, "file", "files")}`;
   const res = await fetch("/api/youtube/upload", { method: "POST", body: form });
   const scan = await res.json();
+  if (res.ok && scan.has_files) S.status.youtube.takeout = scan;
+  if (!$("upload-status")) return;       // the user moved on (e.g. to API keys); Back shows the result
   if (!res.ok || !scan.has_files) {
     $("upload-status").textContent = scan.html_history
       ? "Only an HTML history was found. Export again with JSON for history."
       : "No watch history or playlists were found in those files.";
     return;
   }
-  S.status.youtube.takeout = scan;
   showYoutubeBuild(scan);
 }
 
@@ -939,6 +1032,7 @@ function showYoutubeBuild(scan) {
 }
 
 async function startBuild(provider, likesFile) {
+  if (S.status) S.status.job.status = "running";   // block the keys form before the first poll
   await fetch("/api/build", { method: "POST", headers: { "Content-Type": "application/json" },
                               body: JSON.stringify({ provider, likes_file: likesFile === undefined ? null : likesFile }) });
   watchJob();
@@ -954,18 +1048,22 @@ function watchJob() {
     S.status = st;
     const job = st.job;
     if (job.status === "running" || job.status === "idle") {
-      $("bar").style.width = `${job.total ? Math.min(100, (100 * job.done) / job.total) : 4}%`;
-      $("progress-text").textContent = job.total
-        ? `${job.step}: ${num(job.done)} of ${num(job.total)}` : job.step || "Starting";
+      if ($("bar")) {                    // keep polling even if the progress screen was replaced
+        $("bar").style.width = `${job.total ? Math.min(100, (100 * job.done) / job.total) : 4}%`;
+        $("progress-text").textContent = job.total
+          ? `${job.step}: ${num(job.done)} of ${num(job.total)}` : job.step || "Starting";
+      }
       setTimeout(tick, 700);
     } else if (job.status === "done") {
       S.data[job.provider] = null;
       S.provider = job.provider;
       showProvider();
     } else {
+      const signIn = job.provider === "spotify" && st.spotify.configured && !st.spotify.authenticated;
       overlay(`<h2>The build stopped</h2><p class="error">${esc(job.error)}</p>
         <p>Details are in the terminal running <code>app.py</code>.</p>
-        <button type="button" class="btn" id="retry">Try again</button>`);
+        <div class="actions">${signIn ? `<a class="btn" href="/login">Connect Spotify</a>` : ""}
+          <button type="button" class="${signIn ? "text-btn" : "btn"}" id="retry">Try again</button></div>`);
       $("retry").addEventListener("click", () => startBuild(job.provider));
     }
   };
